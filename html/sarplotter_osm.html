@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+ <head>
+  <meta charset="utf-8"/>
+  <title>SAR Planner (OpenStreetMap)</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <script type="text/javascript">
+    var map = null;
+    var routeLayer = null;
+
+    function getById(id) {
+      return document.getElementById(id);
+    }
+
+    function getValue(id) {
+      return getById(id).value;
+    }
+
+    function setVisible(id, visible) {
+      getById(id).style.display = visible ? "" : "none";
+    }
+
+    function toggleVisible(id) {
+      var element = getById(id);
+      var isHidden = window.getComputedStyle(element).display === "none";
+      element.style.display = isHidden ? "" : "none";
+    }
+
+    function showStatus(message, isError) {
+      var status = getById("status");
+      status.textContent = message;
+      status.className = isError ? "error" : "info";
+      status.style.display = "block";
+    }
+
+    function clearStatus() {
+      var status = getById("status");
+      status.textContent = "";
+      status.className = "";
+      status.style.display = "none";
+    }
+
+    function initializePage() {
+      setVisible("input", false);
+      setVisible("status", false);
+
+      if (window.location.protocol === "file:") {
+        showStatus("Open this page through http://localhost, not directly as a file. OpenStreetMap's tile servers block file:// pages because they do not send the required Referer header.", true);
+      }
+
+      map = L.map("map").setView([41.2605, -96.0130], 4);
+
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        maxZoom: 19
+      }).addTo(map);
+
+      routeLayer = L.featureGroup().addTo(map);
+    }
+
+    function parseCoordinatePair(value) {
+      var parts = value.split(",");
+      if (parts.length !== 2) {
+        return null;
+      }
+
+      var latitude = parseFloat(parts[0].trim());
+      var longitude = parseFloat(parts[1].trim());
+      if (isNaN(latitude) || isNaN(longitude)) {
+        return null;
+      }
+
+      return [latitude, longitude];
+    }
+
+    function clearRoute() {
+      if (routeLayer) {
+        routeLayer.clearLayers();
+      }
+    }
+
+    function ensureNumber(value, label) {
+      if (isNaN(value)) {
+        throw new Error(label + " must be a valid number.");
+      }
+      return value;
+    }
+
+    function validateWaypointArray(waypoint) {
+      if (!waypoint || !waypoint.length) {
+        throw new Error("No route was generated for the selected pattern.");
+      }
+    }
+
+    function plotSARroute() {
+      setVisible("input", false);
+      clearStatus();
+
+      if (!map || !routeLayer) {
+        showStatus("The map is not ready yet. Reload the page and try again.", true);
+        return;
+      }
+
+      try {
+        var csp = parseCoordinatePair(getValue("csp"));
+        if (!csp) {
+          throw new Error("Commence Search Point must be two comma-separated numbers.");
+        }
+
+        var pattern = getValue("pattern");
+        var major = parseFloat(getValue("major"));
+        var minor = parseFloat(getValue("minor"));
+        var track = parseFloat(getValue("track"));
+        var space = parseFloat(getValue("space"));
+        var numlegs = parseFloat(getValue("numlegs"));
+        var rearth = 6371;
+        var waypoint = [csp];
+        var i;
+        var bearing;
+        var distance;
+        var lat1;
+        var lon1;
+        var lat2;
+        var lon2;
+
+        if (pattern == "Parallel" || pattern == "Creep Line") {
+          ensureNumber(major, "Major Axis");
+          ensureNumber(minor, "Minor Axis");
+          ensureNumber(track, "Track");
+          ensureNumber(space, "Space");
+          ensureNumber(numlegs, "Number of Search Legs");
+
+          if (pattern == "Creep Line") {
+            major = major + minor;
+            minor = major - minor;
+            major = major - minor;
+          }
+
+          waypoint = new Array(2 * numlegs);
+          for (i = 0; i < waypoint.length; i++) {
+            waypoint[i] = new Array(2);
+          }
+
+          waypoint[0] = csp;
+
+          for (i = 1; i < 2 * numlegs; i++) {
+            if (i % 2 === 0) {
+              bearing = minor;
+              distance = space;
+            } else {
+              if ((i - 1) % 4 === 0) {
+                bearing = major;
+                distance = track;
+              } else {
+                if (major >= 180) {
+                  bearing = major - 180;
+                } else {
+                  bearing = major + 180;
+                }
+                distance = track;
+              }
+            }
+
+            lat1 = waypoint[i - 1][0] * Math.PI / 180;
+            lon1 = waypoint[i - 1][1] * Math.PI / 180;
+            bearing *= Math.PI / 180;
+            distance *= 1.852;
+
+            lat2 = Math.asin(Math.sin(lat1) * Math.cos(distance / rearth) + Math.cos(lat1) * Math.sin(distance / rearth) * Math.cos(bearing));
+            lon2 = lon1 + Math.atan2(
+              Math.sin(bearing) * Math.sin(distance / rearth) * Math.cos(lat1),
+              Math.cos(distance / rearth) - Math.sin(lat1) * Math.sin(lat2)
+            );
+
+            waypoint[i][0] = lat2 * 180 / Math.PI;
+            waypoint[i][1] = lon2 * 180 / Math.PI;
+          }
+        }
+        else if (pattern == "Sector Search") {
+          ensureNumber(major, "Major Axis");
+          ensureNumber(track, "Track");
+
+          waypoint = new Array(8);
+          for (i = 0; i < waypoint.length; i++) {
+            waypoint[i] = new Array(2);
+          }
+
+          waypoint[0] = csp;
+          waypoint[7] = csp;
+
+          var heading = major;
+
+          for (i = 1; i <= 6; i++) {
+            if (i == 3 || i == 5) {
+              distance = 2 * track;
+            } else {
+              distance = track;
+            }
+
+            lat1 = waypoint[i - 1][0] * Math.PI / 180;
+            lon1 = waypoint[i - 1][1] * Math.PI / 180;
+            bearing = heading * Math.PI / 180;
+            distance *= 1.852;
+
+            lat2 = Math.asin(Math.sin(lat1) * Math.cos(distance / rearth) + Math.cos(lat1) * Math.sin(distance / rearth) * Math.cos(bearing));
+            lon2 = lon1 + Math.atan2(
+              Math.sin(bearing) * Math.sin(distance / rearth) * Math.cos(lat1),
+              Math.cos(distance / rearth) - Math.sin(lat1) * Math.sin(lat2)
+            );
+
+            waypoint[i][0] = lat2 * 180 / Math.PI;
+            waypoint[i][1] = lon2 * 180 / Math.PI;
+
+            heading += 120;
+            while (heading >= 360) {
+              heading -= 360;
+            }
+          }
+        }
+        else if (pattern == "Expanding Square") {
+          ensureNumber(major, "Major Axis");
+          ensureNumber(track, "Track");
+          ensureNumber(numlegs, "Number of Search Legs");
+
+          waypoint = new Array(numlegs + 1);
+          for (i = 0; i < waypoint.length; i++) {
+            waypoint[i] = new Array(2);
+          }
+
+          waypoint[0] = csp;
+
+          var heading = major;
+
+          for (i = 1; i <= numlegs; i++) {
+            distance = track * Math.ceil(i / 2);
+
+            lat1 = waypoint[i - 1][0] * Math.PI / 180;
+            lon1 = waypoint[i - 1][1] * Math.PI / 180;
+            bearing = heading * Math.PI / 180;
+            distance *= 1.852;
+
+            lat2 = Math.asin(Math.sin(lat1) * Math.cos(distance / rearth) + Math.cos(lat1) * Math.sin(distance / rearth) * Math.cos(bearing));
+            lon2 = lon1 + Math.atan2(
+              Math.sin(bearing) * Math.sin(distance / rearth) * Math.cos(lat1),
+              Math.cos(distance / rearth) - Math.sin(lat1) * Math.sin(lat2)
+            );
+
+            waypoint[i][0] = lat2 * 180 / Math.PI;
+            waypoint[i][1] = lon2 * 180 / Math.PI;
+
+            heading -= 90;
+            while (heading < 0) {
+              heading += 360;
+            }
+          }
+        }
+        else if (pattern == "Single Point") {
+          waypoint = [csp];
+        }
+        else {
+          throw new Error("Select a search pattern before plotting.");
+        }
+
+        validateWaypointArray(waypoint);
+        clearRoute();
+
+        L.marker([csp[0], csp[1]], {
+          title: "Commence Search Point"
+        }).addTo(routeLayer).bindPopup("CSP: " + csp[0].toFixed(4) + ", " + csp[1].toFixed(4));
+
+        for (i = 1; i < waypoint.length; i++) {
+          L.polyline(
+            [
+              [waypoint[i - 1][0], waypoint[i - 1][1]],
+              [waypoint[i][0], waypoint[i][1]]
+            ],
+            {
+              color: "#ff0000",
+              weight: 4,
+              opacity: 1.0
+            }
+          ).addTo(routeLayer);
+        }
+
+        if (waypoint.length === 1) {
+          map.setView([csp[0], csp[1]], 10);
+        } else {
+          map.fitBounds(routeLayer.getBounds(), {
+            padding: [20, 20]
+          });
+        }
+      } catch (error) {
+        showStatus(error.message, true);
+      }
+    }
+
+    function select_pattern() {
+      var pattern = getValue("pattern");
+      if (pattern == "Parallel" || pattern == "Creep Line") {
+        setVisible("pattern_details", true);
+        getById("plotbutton").disabled = false;
+        getById("minor").disabled = false;
+        getById("space").disabled = false;
+        getById("numlegs").disabled = false;
+      }
+      else if (pattern == "Sector Search") {
+        setVisible("pattern_details", true);
+        getById("plotbutton").disabled = false;
+        getById("minor").disabled = true;
+        getById("space").disabled = true;
+        getById("numlegs").disabled = true;
+      }
+      else if (pattern == "Expanding Square") {
+        setVisible("pattern_details", true);
+        getById("plotbutton").disabled = false;
+        getById("minor").disabled = true;
+        getById("space").disabled = true;
+        getById("numlegs").disabled = false;
+      }
+      else if (pattern == "Single Point") {
+        setVisible("pattern_details", false);
+        getById("plotbutton").disabled = false;
+      }
+      else {
+        setVisible("pattern_details", false);
+        getById("plotbutton").disabled = true;
+      }
+    }
+  </script>
+  <style rel="stylesheet" type="text/css">
+    #title {
+      width: 900px;
+      margin: auto;
+    }
+    #input_holder {
+      width: 900px;
+      margin: auto;
+    }
+    #input {
+      opacity: 0.9;
+      width: 375px;
+      position: relative;
+      margin: 0 0 8px 0;
+      background: #ffffff;
+      border: thin solid #000000;
+      padding: 8px;
+      box-sizing: border-box;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+    }
+    #map {
+      width: 900px;
+      height: 500px;
+      margin: auto;
+      border: thin solid #000000;
+      background: #f1f3f4;
+    }
+    #patterndetail {
+      width: 900px;
+      height: 200px;
+      margin: auto;
+      overflow: auto;
+    }
+    #patterndetail td {
+      text-align: center;
+    }
+    #copyright {
+      font-size: x-small;
+      width: 900px;
+      margin: auto;
+    }
+    #status {
+      width: 900px;
+      margin: 0 auto 8px auto;
+      padding: 10px 12px;
+      box-sizing: border-box;
+      border: thin solid #b3261e;
+      background: #fce8e6;
+      color: #5f2120;
+      display: none;
+    }
+    #status.info {
+      border-color: #1a73e8;
+      background: #e8f0fe;
+      color: #174ea6;
+    }
+    #status.error {
+      border-color: #b3261e;
+      background: #fce8e6;
+      color: #5f2120;
+    }
+    h1 {
+      font-size: x-large;
+      margin: 0px;
+    }
+    h2 {
+      font-size: large;
+      text-align: center;
+      margin: 0px;
+    }
+  </style>
+ </head>
+ <body onload="initializePage()">
+  <div id="title">
+    <h1>SAR Pattern Plotter</h1>
+  </div>
+  <div id="status"></div>
+  <div id="input_holder">
+    <div id="input" style="display:none">
+      <h2>Plot Search Pattern</h2>
+      <form>
+        <table style="margin-left:auto;margin-right:auto;">
+          <tr>
+            <td>Commence Search Point (CSP)</td>
+            <td><input name="csp" id="csp" value="41.2605, -96.0130" /></td>
+          </tr>
+          <tr>
+            <td>Pattern Type</td>
+            <td><select name="pattern" id="pattern" onChange="select_pattern();">
+              <option selected>&nbsp;</option>
+              <option>Single Point</option>
+              <option>Parallel</option>
+              <option>Creep Line</option>
+              <option>Sector Search</option>
+              <option>Expanding Square</option>
+            </select></td>
+          </tr>
+          <tr>
+            <td colspan="2">
+              <div id="pattern_details" style="display:none">
+                <hr>
+                <table>
+                  <tr>
+                    <td>Major Axis</td>
+                    <td><input name="major" id="major" value="180" /></td>
+                  </tr>
+                  <tr>
+                    <td>Minor Axis</td>
+                    <td><input name="minor" id="minor" value="90" /></td>
+                  </tr>
+                  <tr>
+                    <td>Track (nm)</td>
+                    <td><input name="track" id="track" /></td>
+                  </tr>
+                  <tr>
+                    <td>Space (nm)</td>
+                    <td><input name="space" id="space" /></td>
+                  </tr>
+                  <tr>
+                    <td>Number of Search Legs</td>
+                    <td><select name="numlegs" id="numlegs">
+                      <option>1</option>
+                      <option>2</option>
+                      <option>3</option>
+                      <option>4</option>
+                      <option>5</option>
+                      <option>6</option>
+                      <option>7</option>
+                      <option>8</option>
+                      <option>9</option>
+                      <option>10</option>
+                      <option>11</option>
+                      <option>12</option>
+                      <option>13</option>
+                      <option>14</option>
+                      <option>15</option>
+                      <option>16</option>
+                      <option>17</option>
+                      <option>18</option>
+                      <option>19</option>
+                      <option>20</option>
+                    </select></td>
+                  </tr>
+                </table>
+                <hr>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td colspan="2" style="text-align:right;">
+              <input id="plotbutton" type="button" value="Plot SAR Route" onClick="plotSARroute();" disabled>
+              <input type="button" value="Cancel" onClick="setVisible('input', false);">
+            </td>
+          </tr>
+        </table>
+      </form>
+    </div>
+  </div>
+  <div id="map"></div>
+  <div id="patterndetail" style="display:none;">
+    <table width="100%">
+      <tr>
+        <th>ID</th>
+        <th>Pattern Type</th>
+        <th>Major Axis</th>
+        <th>Minor Axis</th>
+        <th>Track</th>
+        <th>Spacing</th>
+        <th>Legs</th>
+        <th>Display On Map</th>
+      </tr>
+      <tr>
+        <td>1</td>
+        <td>Parallel</td>
+        <td>180</td>
+        <td>90</td>
+        <td>20</td>
+        <td>5</td>
+        <td>10</td>
+        <td><input type="checkbox"></td>
+      </tr>
+    </table>
+  </div>
+  <div id="copyright">
+    <input type="button" value="Plot Search Pattern" onClick="toggleVisible('input');" style="float:right;">
+    <a href="https://www.gnu.org/copyleft/gpl.html"><img src="https://www.gnu.org/graphics/gplv3-88x31.png" style="float:left" border="0" alt="GPL v3"></a>
+    Copyright &copy; 2009-2026 <a href="http://nharmon.multics.org/">Nathan Harmon</a><br>
+    Released under the <a href="https://www.gnu.org/copyleft/gpl.html">GNU General Public License</a><br>
+    Map data &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors
+  </div>
+ </body>
+</html>
